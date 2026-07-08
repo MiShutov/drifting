@@ -1,0 +1,47 @@
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
+from pathlib import Path
+
+
+class PokemonDataset(Dataset):
+    def __init__(self, root_dir, img_size=128):
+        """
+        Args:
+            root_dir (str): Путь к папке 'images' из скачанного датасета.
+            transform (callable, optional): Трансформации для изображений.
+        """
+        self.root_dir = Path(root_dir)
+        self.transform = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0, hue=0.4),
+            transforms.RandomAffine(degrees=(-15, 15), translate=(0.05, 0.01), scale=(0.8, 0.9), fill=255),
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
+            )
+        ])
+        
+        self.image_paths = []
+        for pokemon_dir in self.root_dir.iterdir():
+            if pokemon_dir.is_dir():
+                for img_path in pokemon_dir.glob("*.jpg"):
+                    self.image_paths.append(img_path)
+        
+        print(f"Number of images: {len(self.image_paths)}")
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        
+        image = Image.open(img_path).convert("RGB")  # Сначала RGB для конвертации
+
+        if self.transform:
+            image = self.transform(image)
+            
+        
+        return image.to(torch.bfloat16)

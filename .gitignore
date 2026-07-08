@@ -1,0 +1,6 @@
+data
+checkpoints
+flux_vae
+__pycache__
+
+*.pth
