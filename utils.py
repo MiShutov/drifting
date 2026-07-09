@@ -53,5 +53,13 @@ def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True):
             
             plt.axis('off')
         
-        plt.tight_layout()
+        plt.tight_layout(pad=0.1)  # внешние отступы
+        plt.subplots_adjust(wspace=0.02, hspace=0.02)  # внутренние отступы
         plt.show()
+
+
+def prepare_noise(batch_size, latent_shape, device="cuda:0", dtype=torch.bfloat16, initial_seed=None):
+    """Prepare noise for generation."""
+    if initial_seed is not None:
+        torch.manual_seed(initial_seed)
+    return torch.randn(batch_size, *latent_shape, device=device, dtype=dtype)
