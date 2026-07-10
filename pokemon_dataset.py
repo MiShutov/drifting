@@ -7,11 +7,6 @@ from pathlib import Path
 
 class PokemonDataset(Dataset):
     def __init__(self, root_dir, img_size=128):
-        """
-        Args:
-            root_dir (str): Путь к папке 'images' из скачанного датасета.
-            transform (callable, optional): Трансформации для изображений.
-        """
         self.root_dir = Path(root_dir)
         self.transform = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
@@ -38,7 +33,7 @@ class PokemonDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         
-        image = Image.open(img_path).convert("RGB")  # Сначала RGB для конвертации
+        image = Image.open(img_path).convert("RGB")
 
         if self.transform:
             image = self.transform(image)

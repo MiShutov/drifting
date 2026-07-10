@@ -85,8 +85,8 @@ class TinyDiT(nn.Module):
 
     def forward(self, x):
         """
-        x: [B, C, H, W] — зашумленное изображение
-        y: [B] — метки классов (опционально)
+        x: [B, C, H, W]
+        y: [B]
         """
         B, C, H, W = x.shape
         p = self.patch_size
