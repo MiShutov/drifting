@@ -15,8 +15,8 @@ class PokemonDataset(Dataset):
         self.root_dir = Path(root_dir)
         self.transform = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0, hue=0.4),
-            transforms.RandomAffine(degrees=(-15, 15), translate=(0.05, 0.01), scale=(0.8, 0.9), fill=255),
+            # transforms.ColorJitter(brightness=0, hue=0.4),
+            # transforms.RandomAffine(degrees=(-15, 15), translate=(0.05, 0.01), scale=(0.8, 0.9), fill=255),
             transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
             transforms.Normalize(
