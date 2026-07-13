@@ -7,7 +7,13 @@ def get_number_of_parameters(model):
     n_params = 0
     for p in model.parameters():
         n_params += p.numel()
-    print("Params:", n_params)
+    
+    if n_params >= 1e9:
+        print(f"Params: {n_params / 1e9:.3g}B")
+    elif n_params >= 1e6:
+        print(f"Params: {n_params / 1e6:.3g}M")
+    else:
+        print(f"Params: {n_params:,}")
 
 
 def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True):
