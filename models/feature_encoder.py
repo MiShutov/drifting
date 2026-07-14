@@ -39,9 +39,6 @@ class MultiScaleFeatureEncoder(nn.Module):
         # Нормализация входных данных
         if x.min() < 0:
             x = (x + 1) / 2
-        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
-        x = (x - mean.to(x.dtype)) / std.to(x.dtype)
 
         # --- (e) Входные статистики ---
         # Среднее квадратов входного сигнала по каналам
