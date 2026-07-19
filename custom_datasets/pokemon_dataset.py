@@ -11,7 +11,8 @@ class PokemonDataset(Dataset):
             
         if dataset_type == "FACES":
             self.transform = transforms.Compose([
-                transforms.Resize((img_size, img_size)),
+                transforms.Resize((img_size)),
+                transforms.CenterCrop((img_size, img_size)),
                 transforms.ToTensor(),
                 transforms.Normalize(
                     mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
