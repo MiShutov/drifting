@@ -16,7 +16,7 @@ def get_number_of_parameters(model):
         print(f"Params: {n_params:,}")
 
 
-def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True):
+def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True, save_path=None):
     """
     Display batch of images as a grid without any labels or numbering.
     
@@ -25,6 +25,7 @@ def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True):
         n (int): Number of images per row/column (grid will be n x n)
         figsize (tuple): Figure size (width, height) in inches
         denormalize (bool): Apply denormalization if images are in [-1, 1]
+        save_path (str): Path to save the image. If None, only displays.
     """
     with torch.no_grad():
         if isinstance(batch, torch.Tensor):
@@ -59,13 +60,19 @@ def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True):
             
             plt.axis('off')
         
-        plt.tight_layout(pad=0.1)  # внешние отступы
-        plt.subplots_adjust(wspace=0.02, hspace=0.02)  # внутренние отступы
+        plt.tight_layout(pad=0.1)
+        plt.subplots_adjust(wspace=0.02, hspace=0.02)
+        
+        # Save if path is provided
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
+            print(f"Saved image to {save_path}")
+        
         plt.show()
 
 
-def prepare_noise(batch_size, latent_shape, device="cuda:0", dtype=torch.bfloat16, initial_seed=None):
+def prepare_noise(batch_size, noise_shape, device="cuda:0", dtype=torch.bfloat16, initial_seed=None):
     """Prepare noise for generation."""
     if initial_seed is not None:
         torch.manual_seed(initial_seed)
-    return torch.randn(batch_size, *latent_shape, device=device, dtype=dtype)
+    return torch.randn(batch_size, *noise_shape, device=device, dtype=dtype)

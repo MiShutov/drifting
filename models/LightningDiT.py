@@ -1,4 +1,5 @@
 import os
+import json
 import math
 import numpy as np
 
@@ -6,11 +7,156 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-
+from accelerate import init_empty_weights
 from timm.models.vision_transformer import PatchEmbed, Mlp
 from models.swiglu_ffn import SwiGLUFFN 
 from models.pos_embed import VisionRotaryEmbeddingFast
 from models.rmsnorm import RMSNorm
+
+
+def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
+    """
+    grid_size: int of the grid height and width
+    return:
+    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
+    """
+    grid_h = np.arange(grid_size, dtype=np.float32)
+    grid_w = np.arange(grid_size, dtype=np.float32)
+    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
+    grid = np.stack(grid, axis=0)
+
+    grid = grid.reshape([2, 1, grid_size, grid_size])
+    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
+    if cls_token and extra_tokens > 0:
+        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
+    return pos_embed
+
+
+def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
+    assert embed_dim % 2 == 0
+
+    # use half of dimensions to encode grid_h
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
+
+    emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
+    return emb
+
+
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """
+    embed_dim: output dimension for each position
+    pos: a list of positions to be encoded: size (M,)
+    out: (M, D)
+    """
+    assert embed_dim % 2 == 0
+    omega = np.arange(embed_dim // 2, dtype=np.float64)
+    omega /= embed_dim / 2.
+    omega = 1. / 10000**omega  # (D/2,)
+
+    pos = pos.reshape(-1)  # (M,)
+    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+
+    emb_sin = np.sin(out) # (M, D/2)
+    emb_cos = np.cos(out) # (M, D/2)
+
+    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
+    return emb
+
+
+class LightningDiTConfig:
+    """
+    Configuration class for LightningDiT model.
+    """
+    def __init__(
+        self,
+        dtype: torch.dtype = torch.bfloat16,
+        input_size: int = 32,
+        patch_size: int = 2,
+        in_channels: int = 32,
+        hidden_size: int = 1152,
+        num_transformer_blocks: int = 28,
+        num_heads: int = 16,
+        mlp_ratio: float = 4.0,
+        use_qknorm: bool = False,
+        use_swiglu: bool = True,
+        use_rope: bool = False,
+        use_rmsnorm: bool = False,
+        use_checkpointing: bool = False,
+        **kwargs
+    ):
+        self.model_type = "LightningDiT"
+        self.dtype = dtype
+        self.input_size = input_size
+        self.patch_size = patch_size
+        self.in_channels = in_channels
+        self.hidden_size = hidden_size
+        self.num_transformer_blocks = num_transformer_blocks
+        self.num_heads = num_heads
+        self.mlp_ratio = mlp_ratio
+        self.use_qknorm = use_qknorm
+        self.use_swiglu = use_swiglu
+        self.use_rope = use_rope
+        self.use_rmsnorm = use_rmsnorm
+        self.use_checkpointing = use_checkpointing
+        
+        # Store any additional kwargs
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+    
+    def to_dict(self) -> dict:
+        """
+        Convert config to dictionary.
+        """
+        config_dict = {}
+        for key, value in self.__dict__.items():
+            if not key.startswith('_'):  # Skip private attributes
+                config_dict[key] = value
+        return config_dict
+    
+    def to_json_string(self) -> str:
+        """
+        Serialize config to JSON string.
+        """
+        return json.dumps(self.to_dict(), indent=2)
+    
+    def save_pretrained(self, path: str):
+        """
+        Save configuration to JSON file.
+        """
+        os.makedirs(path, exist_ok=True)
+        config_path = os.path.join(path, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        return config_path
+    
+    @classmethod
+    def from_pretrained(cls, path: str) -> "LightningDiTConfig":
+        """
+        Load configuration from JSON file.
+        """
+        config_path = os.path.join(path, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found at {config_path}")
+        
+        with open(config_path, "r") as f:
+            config_dict = json.load(f)
+        
+        # Verify model type
+        if config_dict.get("model_type") != "LightningDiT":
+            raise ValueError(f"Expected model_type 'LightningDiT', got '{config_dict.get('model_type')}'")
+        
+        return cls(**config_dict)
+    
+    @classmethod
+    def from_dict(cls, config_dict: dict) -> "LightningDiTConfig":
+        """
+        Create config from dictionary.
+        """
+        return cls(**config_dict)
+    
+    def __repr__(self) -> str:
+        return f"LightningDiTConfig({self.to_json_string()})"
 
 
 class Attention(nn.Module):
@@ -84,7 +230,6 @@ class LightningDiTBlock(nn.Module):
         use_qknorm=False,
         use_swiglu=False, 
         use_rmsnorm=False,
-        wo_shift=False,
         **block_kwargs
     ):
         super().__init__()
@@ -153,38 +298,39 @@ class LightningDiT(nn.Module):
     """
     def __init__(
         self,
-        input_size=32,
-        patch_size=2,
-        in_channels=32,
-        hidden_size=1152,
-        depth=28,
-        num_heads=16,
-        mlp_ratio=4.0,
-        use_qknorm=False,
-        use_swiglu=True,
-        use_rope=False,
-        use_rmsnorm=False,
-        use_checkpointing=False,
+        config: LightningDiTConfig
     ):
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = in_channels
-        self.patch_size = patch_size
-        self.num_heads = num_heads
-        self.use_rope = use_rope
-        self.use_rmsnorm = use_rmsnorm
-        self.depth = depth
-        self.hidden_size = hidden_size
-        self.use_checkpointing = use_checkpointing
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.config = config
+
+        self.input_size = config.input_size
+        self.in_channels = config.in_channels
+        self.out_channels = config.in_channels
+        self.patch_size = config.patch_size
+        self.num_heads = config.num_heads
+        self.mlp_ratio = config.mlp_ratio
+        self.use_qknorm = config.use_qknorm
+        self.use_swiglu = config.use_swiglu
+        self.use_rope = config.use_rope
+        self.use_rmsnorm = config.use_rmsnorm
+        self.num_transformer_blocks = config.num_transformer_blocks
+        self.hidden_size = config.hidden_size
+        self.use_checkpointing = config.use_checkpointing
+        
+        self.x_embedder = PatchEmbed(
+            self.input_size, 
+            self.patch_size, 
+            self.in_channels, 
+            self.hidden_size, 
+            bias=True
+        )
         num_patches = self.x_embedder.num_patches
-        # Will use fixed sin-cos embedding:
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, self.hidden_size), requires_grad=False)
 
         # use rotary position encoding, borrow from EVA
         if self.use_rope:
-            half_head_dim = hidden_size // num_heads // 2
-            hw_seq_len = input_size // patch_size
+            half_head_dim = self.hidden_size // self.num_heads // 2
+            hw_seq_len = self.input_size // self.patch_size
             self.feat_rope = VisionRotaryEmbeddingFast(
                 dim=half_head_dim,
                 pt_seq_len=hw_seq_len,
@@ -193,16 +339,23 @@ class LightningDiT(nn.Module):
             self.feat_rope = None
 
         self.blocks = nn.ModuleList([
-            LightningDiTBlock(hidden_size, 
-                     num_heads, 
-                     mlp_ratio=mlp_ratio, 
-                     use_qknorm=use_qknorm, 
-                     use_swiglu=use_swiglu, 
-                     use_rmsnorm=use_rmsnorm,
-                     ) for _ in range(depth)
+            LightningDiTBlock(
+                hidden_size=self.hidden_size, 
+                num_heads=self.num_heads, 
+                mlp_ratio=self.mlp_ratio, 
+                use_qknorm=self.use_qknorm, 
+                use_swiglu=self.use_swiglu, 
+                use_rmsnorm=self.use_rmsnorm,
+                ) for _ in range(self.num_transformer_blocks)
         ])
-        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
+        self.final_layer = FinalLayer(
+            self.hidden_size, 
+            self.patch_size, 
+            self.out_channels, 
+            use_rmsnorm=self.use_rmsnorm
+        )
         self.initialize_weights()
+        self.to(getattr(torch, config.dtype))
 
 
     def initialize_weights(self):
@@ -251,7 +404,6 @@ class LightningDiT(nn.Module):
         Forward pass of LightningDiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         """
-
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
 
         for block in self.blocks:
@@ -260,57 +412,66 @@ class LightningDiT(nn.Module):
             else:
                 x = block(x, self.feat_rope)
 
-        x = self.final_layer(x)                # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        x = self.final_layer(x)     # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)      # (N, out_channels, H, W)
 
         return x
 
 
-def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
-    """
-    grid_size: int of the grid height and width
-    return:
-    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
-    """
-    grid_h = np.arange(grid_size, dtype=np.float32)
-    grid_w = np.arange(grid_size, dtype=np.float32)
-    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
-    grid = np.stack(grid, axis=0)
+    def save_pretrained(self, path, verbose=False):
+        """
+        Save model weights and configuration to the specified path.
+        Creates the directory if it doesn't exist.
+        
+        Args:
+            path (str): Directory path where to save the model
+        """
+        os.makedirs(path, exist_ok=True)
+        
+        # Save configuration using the config object
+        config_path = self.config.save_pretrained(path)
+        
+        # Save model weights
+        weights_path = os.path.join(path, "pytorch_model.pth")
+        torch.save(self.state_dict(), weights_path)
 
-    grid = grid.reshape([2, 1, grid_size, grid_size])
-    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
-    return pos_embed
+        if verbose:
+            print(f"Model saved to {path}")
+            print(f"  - Config: {config_path}")
+            print(f"  - Weights: {weights_path}")
+            return config_path, weights_path
 
+    @staticmethod
+    def from_pretrained(path, device="cpu", dtype=torch.bfloat16):
+        """
+        Load a pretrained LightningDiT model from the specified path.
+        
+        Args:
+            path (str): Directory path where the model is saved
+            
+        Returns:
+            LightningDiT: Loaded model with pretrained weights
+        """
+        # Load configuration
+        config = LightningDiTConfig.from_pretrained(path)
+        
+        # Create model with loaded config
+        with init_empty_weights():
+            model = LightningDiT(config=config)
+        model = model.to_empty(device=device)
+        model = model.to(getattr(torch, config.dtype))
+        
+        # Load weights
+        weights_path = os.path.join(path, "pytorch_model.pth")
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Weights file not found at {weights_path}")
+        
+        state_dict = torch.load(weights_path, map_location="cpu")
+        model.load_state_dict(state_dict)
+        
+        print(f"Model loaded from {path}")
+        print(f"  - Config: {os.path.join(path, 'config.json')}")
+        print(f"  - Weights: {weights_path}")
+        
+        return model
 
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
-    assert embed_dim % 2 == 0
-
-    # use half of dimensions to encode grid_h
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
-
-    emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
-    return emb
-
-
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    """
-    embed_dim: output dimension for each position
-    pos: a list of positions to be encoded: size (M,)
-    out: (M, D)
-    """
-    assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.
-    omega = 1. / 10000**omega  # (D/2,)
-
-    pos = pos.reshape(-1)  # (M,)
-    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
-
-    emb_sin = np.sin(out) # (M, D/2)
-    emb_cos = np.cos(out) # (M, D/2)
-
-    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
-    return emb
