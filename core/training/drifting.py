@@ -9,27 +9,37 @@ def compute_drift(
     y_pos: torch.Tensor,                  # [N_features, N_pos, D]
     y_neg: Optional[torch.Tensor] = None, # [N_features, N_neg, D] or None
     T_list: List[float] = [0.02, 0.05, 0.2],
-    force_fp32=False
+    force_fp32=False,
+    samples_block=64,
 ) -> torch.Tensor:
     log_dict = {}
 
     N_features, N_x, D = x.shape
-    N_pos = y_pos.shape[1]
     N_temp = len(T_list)
-
     x_dtype = x.dtype
-
-    if force_fp32:
-        x = x.float()
-        y_pos = y_pos.float()
-        y_neg = y_neg.float() if y_neg is not None else y_neg
 
     if y_neg is None:
         y_neg = x
         mask_self = True
     else:
         mask_self = False
-    N_neg = y_neg.shape[1]
+
+    if force_fp32:
+        x = x.float()
+        y_pos = y_pos.float()
+        y_neg = y_neg.float()
+
+    if samples_block is not None:
+        def reshape_to_blocks(t):
+            assert t.shape[1] // samples_block * samples_block == t.shape[1]
+            t = t.reshape(
+                    N_features * (t.shape[1] // samples_block), samples_block, D
+                )
+            return t
+
+        reshape_to_blocks(x)
+        reshape_to_blocks(y_pos)
+        reshape_to_blocks(y_neg)
     
     # --- Dist computation ---
     dist_pos = torch.cdist(x, y_pos)  # [N_features, N_x, N_pos]
@@ -157,6 +167,7 @@ def drifting_loss(
     y_neg: Optional[torch.Tensor] = None, # [N_features, N_neg, D] or None
     T_list: List[float] = [0.02, 0.05, 0.2],
     force_fp32=False,
+    samples_block=64,
 ) -> torch.Tensor:
     """
     Drifting loss
@@ -167,7 +178,8 @@ def drifting_loss(
             y_pos, 
             y_neg,
             T_list,
-            force_fp32=force_fp32
+            force_fp32=force_fp32,
+            samples_block=samples_block
         )
         target = x + V
     return F.mse_loss(x, target.detach()), log_dict
@@ -178,7 +190,8 @@ def drifting_loss_multifeatures(
     y_pos_features: List[torch.Tensor],                             # N_feature_types x [N_features, N_pos, D_feature_type]
     y_neg_features: Optional[List[Optional[torch.Tensor]]] = None,  # N_feature_types x [N_features, y_neg, D_feature_type]
     T_list: List[float] = [0.02, 0.05, 0.2],
-    force_fp32=False
+    force_fp32=False,
+    samples_block=64,
 ) -> torch.Tensor:
     total_loss = 0.0
     n = len(x_features)
@@ -192,8 +205,6 @@ def drifting_loss_multifeatures(
     if isinstance(y_neg_features, dict):
         y_neg_features = list(y_neg_features.values())
 
-
-    dist = 0
     logs = {}
     for i in range(n):
         loss_i, log_dict = drifting_loss(
@@ -201,7 +212,8 @@ def drifting_loss_multifeatures(
             y_pos_features[i], 
             y_neg_features[i],
             T_list,
-            force_fp32=force_fp32
+            force_fp32=force_fp32,
+            samples_block=samples_block
         )
         total_loss = total_loss + loss_i
         logs[i] = log_dict

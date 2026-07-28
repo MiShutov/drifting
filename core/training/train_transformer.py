@@ -79,6 +79,7 @@ def train_drifting(
         noise_shape,
         vae=None,
         T_list=[0.02, 0.05, 0.2],
+        samples_block=None,
         batch_size=64,
         gradient_accumulation=1,
         training_steps=10000,
@@ -140,6 +141,7 @@ def train_drifting(
             x_features=gen_features,
             y_pos_features=pos_features,
             T_list=T_list,
+            samples_block=samples_block,
         )
         loss = loss * loss_scaling
 
