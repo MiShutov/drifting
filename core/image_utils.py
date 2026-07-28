@@ -1,22 +1,47 @@
-import numpy as np
+from tqdm.auto import tqdm
 import torch
+from torchmetrics.image.fid import FrechetInceptionDistance as FID
+import numpy as np
 import matplotlib.pyplot as plt
 
 
-def get_number_of_parameters(model):
-    n_params = 0
-    for p in model.parameters():
-        n_params += p.numel()
-    
-    if n_params >= 1e9:
-        print(f"Params: {n_params / 1e9:.3g}B")
-    elif n_params >= 1e6:
-        print(f"Params: {n_params / 1e6:.3g}M")
-    else:
-        print(f"Params: {n_params:,}")
+def normalize_to_uint8(images):
+    """
+    images: torch.Tensor [-1, 1], float32
+    returns: torch.Tensor [0, 255], uint8
+    """
+    images = (images + 1) * 127.5
+    images = torch.clamp(images, 0, 255)
+    images = images.to(torch.uint8)
+    return images
 
 
-def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True, save_path=None):
+def compute_FID(real_images, gen_images, batch_size=128, device="cuda:0"):
+    metric_fid = FID().to(device)
+    n_real_batches = real_images.shape[0] // batch_size
+    n_gen_batches = gen_images.shape[0] // batch_size
+
+    for b_id in tqdm(range(n_real_batches)):
+        metric_fid.update(normalize_to_uint8(
+            real_images[batch_size*b_id:batch_size*(b_id+1)]).to(device), real=True
+        )
+
+    for b_id in tqdm(range(n_gen_batches)):
+        metric_fid.update(
+            normalize_to_uint8(gen_images[batch_size*b_id:batch_size*(b_id+1)]).to(device), real=False
+        )
+
+    fid_score = metric_fid.compute()
+    return fid_score
+
+
+def show_batch_grid(
+        batch, 
+        n=4, 
+        figsize=(12, 12), 
+        denormalize=True, 
+        save_path=None, 
+        title=None):
     """
     Display batch of images as a grid without any labels or numbering.
     
@@ -48,7 +73,7 @@ def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True, save_path=No
         
         # Create grid
         plt.figure(figsize=figsize)
-        
+
         for i in range(n_images):
             plt.subplot(n, n, i + 1)
             img = batch[i]
@@ -59,9 +84,19 @@ def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True, save_path=No
                 plt.imshow(img)
             
             plt.axis('off')
-        
-        plt.tight_layout(pad=0.1)
-        plt.subplots_adjust(wspace=0.02, hspace=0.02)
+
+
+        if title:
+            plt.tight_layout(pad=0.1, rect=[0, 0, 1, 0.96])  # rect=[left, bottom, right, top]
+        else:
+            plt.tight_layout(pad=0.1)
+
+        plt.subplots_adjust(wspace=0.01, hspace=0.01)
+
+        if title:
+            plt.suptitle(title, fontsize=int(figsize[0]*1.6))
+    
+
         
         # Save if path is provided
         if save_path:
@@ -69,10 +104,3 @@ def show_batch_grid(batch, n=4, figsize=(12, 12), denormalize=True, save_path=No
             print(f"Saved image to {save_path}")
         
         plt.show()
-
-
-def prepare_noise(batch_size, noise_shape, device="cuda:0", dtype=torch.bfloat16, initial_seed=None):
-    """Prepare noise for generation."""
-    if initial_seed is not None:
-        torch.manual_seed(initial_seed)
-    return torch.randn(batch_size, *noise_shape, device=device, dtype=dtype)

@@ -9,9 +9,10 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from accelerate import init_empty_weights
 from timm.models.vision_transformer import PatchEmbed, Mlp
-from models.swiglu_ffn import SwiGLUFFN 
-from models.pos_embed import VisionRotaryEmbeddingFast
-from models.rmsnorm import RMSNorm
+
+from core.models.swiglu_ffn import SwiGLUFFN 
+from core.models.pos_embed import VisionRotaryEmbeddingFast
+from core.models.rmsnorm import RMSNorm
 
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
@@ -442,7 +443,7 @@ class LightningDiT(nn.Module):
             return config_path, weights_path
 
     @staticmethod
-    def from_pretrained(path, device="cpu", dtype=torch.bfloat16):
+    def from_pretrained(path, device="cpu", dtype=torch.bfloat16, verbose=False):
         """
         Load a pretrained LightningDiT model from the specified path.
         
@@ -468,10 +469,11 @@ class LightningDiT(nn.Module):
         
         state_dict = torch.load(weights_path, map_location="cpu")
         model.load_state_dict(state_dict)
-        
-        print(f"Model loaded from {path}")
-        print(f"  - Config: {os.path.join(path, 'config.json')}")
-        print(f"  - Weights: {weights_path}")
+
+        if verbose:
+            print(f"Model loaded from {path}")
+            print(f"  - Config: {os.path.join(path, 'config.json')}")
+            print(f"  - Weights: {weights_path}")
         
         return model
 

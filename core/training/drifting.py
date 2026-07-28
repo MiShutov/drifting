@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from typing import Optional, List, Tuple, Dict
 
 
+@torch.compile
 def compute_drift(
     x: torch.Tensor,                      # [N_features, N_gen, D]
     y_pos: torch.Tensor,                  # [N_features, N_pos, D]
@@ -34,8 +35,68 @@ def compute_drift(
     dist_pos = torch.cdist(x, y_pos)  # [N_features, N_x, N_pos]
     dist_neg = torch.cdist(x, y_neg)  # [N_features, N_x, N_neg]
 
-    # log_dict["dist_pos"] = dist_pos.mean().item()
-    # log_dict["dist_neg"] = dist_neg.mean().item()
+    # --- Scaling ---
+    scale = (dist_pos.mean(dim=[1, 2]) + dist_neg.mean(dim=[1, 2])) / 2  # [N_features]
+    dist_pos = dist_pos / scale.view(N_features, 1, 1)
+    dist_neg = dist_neg / scale.view(N_features, 1, 1)
+
+    # --- Different temperatures logits ---
+    T_tensor = torch.tensor(T_list, device=x.device, dtype=x.dtype).view(N_temp, 1, 1, 1)  # [N_temp, 1, 1, 1]
+    logit_pos = -dist_pos.unsqueeze(0) / T_tensor  # [N_temp, N_features, N_x, N_pos]
+    logit_neg = -dist_neg.unsqueeze(0) / T_tensor  # [N_temp, N_features, N_x, N_neg]
+    
+    if mask_self:
+        eye = torch.eye(N_x, device=x.device, dtype=torch.bool).unsqueeze(0) # [1, N_x, N_x]
+        logit_neg = logit_neg.masked_fill(eye, -100)
+
+    A_pos = F.softmax(logit_pos, dim=-1)  # [N_temp, N_features, N_x, N_pos]
+    A_neg = F.softmax(logit_neg, dim=-1)  # [N_temp, N_features, N_x, N_neg]
+
+    W_pos = A_pos * A_neg.sum(dim=-1, keepdim=True)  # [N_temp, N_features, N_x, N_pos]
+    W_neg = A_neg * A_pos.sum(dim=-1, keepdim=True)  # [N_temp, N_features, N_x, N_neg]
+
+    drift_pos = W_pos @ y_pos
+    drift_neg = W_neg @ y_neg
+    V = drift_pos - drift_neg
+
+    f_norm_val = (V ** 2).mean(dim=[2, 3], keepdim=True)  # [N_temp, N_features, 1, 1]
+    force_scale = torch.sqrt(f_norm_val)  # [N_temp, N_features, 1, 1]
+    log_dict["V_abs"] = force_scale.mean().item()
+
+    V = V.mean(dim=0)  # [N_features, N_x, D]
+    return V.to(x_dtype), log_dict
+
+
+def compute_drift_(
+    x: torch.Tensor,                      # [N_features, N_gen, D]
+    y_pos: torch.Tensor,                  # [N_features, N_pos, D]
+    y_neg: Optional[torch.Tensor] = None, # [N_features, N_neg, D] or None
+    T_list: List[float] = [0.02, 0.05, 0.2],
+    force_fp32=False
+) -> torch.Tensor:
+    log_dict = {}
+
+    N_features, N_x, D = x.shape
+    N_pos = y_pos.shape[1]
+    N_temp = len(T_list)
+
+    x_dtype = x.dtype
+
+    if force_fp32:
+        x = x.float()
+        y_pos = y_pos.float()
+        y_neg = y_neg.float() if y_neg is not None else y_neg
+
+    if y_neg is None:
+        y_neg = x
+        mask_self = True
+    else:
+        mask_self = False
+    N_neg = y_neg.shape[1]
+    
+    # --- Dist computation ---
+    dist_pos = torch.cdist(x, y_pos)  # [N_features, N_x, N_pos]
+    dist_neg = torch.cdist(x, y_neg)  # [N_features, N_x, N_neg]
 
     # --- Scaling ---
     scale = (dist_pos.mean(dim=[1, 2]) + dist_neg.mean(dim=[1, 2])) / 2  # [N_features]
@@ -49,16 +110,10 @@ def compute_drift(
     dist_pos = dist_pos / scale.view(N_features, 1, 1)
     dist_neg = dist_neg / scale.view(N_features, 1, 1)
 
-    # log_dict["dist_pos_scaled"] = (dist_pos.mean().item(), dist_pos.std().item())
-    # log_dict["dist_neg_scaled"] = (dist_neg.mean().item(), dist_neg.std().item())
-
     # --- Different temperatures logits ---
     T_tensor = torch.tensor(T_list, device=x.device, dtype=x.dtype).view(N_temp, 1, 1, 1)  # [N_temp, 1, 1, 1]
     logit_pos = -dist_pos.unsqueeze(0) / T_tensor  # [N_temp, N_features, N_x, N_pos]
     logit_neg = -dist_neg.unsqueeze(0) / T_tensor  # [N_temp, N_features, N_x, N_neg]
-    
-    # log_dict["logit_pos"] = (logit_pos.mean().item(), logit_pos.std().item())
-    # log_dict["logit_neg"] = (logit_neg.mean().item(), logit_neg.std().item())
 
     if mask_self:
         eye = torch.eye(N_x, device=x.device, dtype=torch.bool).unsqueeze(0) # [1, N_x, N_x]
@@ -71,9 +126,6 @@ def compute_drift(
     A_col = F.softmax(logit, dim=-2)  # [N_temp, N_features, N_x, N_total]
     A = torch.sqrt(A_row * A_col + 1e-8)  # [N_temp, N_features, N_x, N_total]
     A_pos, A_neg = torch.split(A, [N_pos, N_neg], dim=3)  # [N_temp, N_features, N_x, N_pos/neg]
-
-    # log_dict["A_pos_median"] = A_pos.median().item()
-    # log_dict["A_neg_median"] = A_neg.median().item()
 
     r_coeff_neg = -A_neg * A_pos.sum(dim=-1, keepdim=True)  # [N_temp, N_features, N_x, N_neg]
     r_coeff_pos = A_pos * A_neg.sum(dim=-1, keepdim=True)   # [N_temp, N_features, N_x, N_pos]
@@ -92,7 +144,6 @@ def compute_drift(
     force_scale = torch.sqrt(f_norm_val)  # [N_temp, N_features, 1, 1]
     # V_temp = total_force / force_scale  # [N_temp, N_features, N_x, D]
     V_temp = total_force # [N_temp, N_features, N_x, D]
-
 
     log_dict["V_abs"] = force_scale.mean().item()
 

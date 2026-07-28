@@ -20,21 +20,12 @@ class PokemonDataset(Dataset):
             ])
         elif dataset_type == "POKEMON":
             self.transform = transforms.Compose([
-                # 1. Геометрия (главное)
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomResizedCrop(size=(img_size, img_size), scale=(0.75, 1.0), ratio=(0.9, 1.1)),
-                
-                # 2. Легкие искажения (чтобы модель не переобучалась на ровные линии)
                 transforms.RandomAffine(degrees=(-10, 10), translate=(0.05, 0.05), scale=(0.85, 0.95), fill=255),
-                
-                # 3. Цвет (мягко)
                 transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.03),
-                
-                # 4. Шумы / размытие (с малой вероятностью)
                 transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))], p=0.2),
                 transforms.RandomGrayscale(p=0.05),
-                
-                # 5. Преобразование в тензор
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
@@ -59,6 +50,5 @@ class PokemonDataset(Dataset):
 
         if self.transform:
             image = self.transform(image)
-            
         
-        return image.to(torch.bfloat16)
+        return image
