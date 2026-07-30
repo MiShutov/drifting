@@ -378,9 +378,7 @@ class LightningDiT(nn.Module):
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Zero-out output layers:
-        # nn.init.constant_(self.final_layer.linear.weight, 0)
-        # nn.init.constant_(self.final_layer.linear.bias, 0)
-        nn.init.normal_(self.final_layer.linear.weight, std=0.1)  # <<< малая дисперсия
+        nn.init.normal_(self.final_layer.linear.weight, std=0.1)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
 
@@ -443,7 +441,7 @@ class LightningDiT(nn.Module):
             return config_path, weights_path
 
     @staticmethod
-    def from_pretrained(path, device="cpu", dtype=torch.bfloat16, verbose=False):
+    def from_pretrained(path, device="cpu", dtype=None, verbose=False):
         """
         Load a pretrained LightningDiT model from the specified path.
         
@@ -460,7 +458,9 @@ class LightningDiT(nn.Module):
         with init_empty_weights():
             model = LightningDiT(config=config)
         model = model.to_empty(device=device)
-        model = model.to(getattr(torch, config.dtype))
+        if dtype is None:
+            dtype = getattr(torch, config.dtype)
+        model = model.to(dtype)
         
         # Load weights
         weights_path = os.path.join(path, "pytorch_model.pth")

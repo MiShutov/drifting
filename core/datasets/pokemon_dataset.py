@@ -9,7 +9,7 @@ class PokemonDataset(Dataset):
     def __init__(self, root_dir, dataset_type, img_size=128):
         self.root_dir = Path(root_dir)
             
-        if dataset_type == "FACES":
+        if dataset_type == "CelebA":
             self.transform = transforms.Compose([
                 transforms.Resize((img_size)),
                 transforms.CenterCrop((img_size, img_size)),
@@ -18,7 +18,7 @@ class PokemonDataset(Dataset):
                     mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
                 )
             ])
-        elif dataset_type == "POKEMON":
+        elif dataset_type == "pokemon":
             self.transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomResizedCrop(size=(img_size, img_size), scale=(0.75, 1.0), ratio=(0.9, 1.1)),

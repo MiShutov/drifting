@@ -1,0 +1,13 @@
+{
+    "model_type": "MAEResNet",
+    "dtype": "bfloat16",
+    "in_channels": 3,
+    "base_channels": 128,
+    "mask_patch_size": 1,
+    "mask_ratio": 0.5,
+    "per_channel_mask": false,
+    "input_patch_size": 8,
+    "dropout_prob": 0.0,
+    "layers": [3, 4, 6, 3],
+    "num_classes": null
+}

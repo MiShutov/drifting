@@ -43,10 +43,13 @@ def validation(
             for _ in tqdm(range(n_batches)):
                 noise = torch.randn(batch_size, *noise_shape, dtype=torch.bfloat16, device=device)
                 with torch.no_grad():
-                    gen_latent = transformer(noise)
-                    gen_images.append(
-                        vae.decode(gen_latent).sample.detach().to(torch.float32).cpu()
-                    )
+                    if vae is not None:
+                        gen_latent = transformer(noise)
+                        gen = vae.decode(gen_latent).sample
+                    else:
+                        gen = transformer(noise)
+                    gen_images.append(gen.detach().to(torch.float32).cpu())
+
             gen_images = torch.cat(gen_images, dim=0)
             fid_score = compute_FID(real_images, gen_images)
             title += f" FID={fid_score:g}"
@@ -70,7 +73,6 @@ def validation(
         )
 
 
-
 def train_drifting(
         dataset,
         feature_encoder,
@@ -78,6 +80,7 @@ def train_drifting(
         opt,
         noise_shape,
         vae=None,
+        pixel_features=False,
         T_list=[0.02, 0.05, 0.2],
         samples_block=None,
         batch_size=64,
@@ -93,6 +96,9 @@ def train_drifting(
         save_path="checkpoints/",
     ):
     """Train drifting model. Returns model and loss history."""
+    if not pixel_features:
+        assert vae is not None
+
     os.makedirs(save_path, exist_ok=True)
     if seed is not None:
         torch.manual_seed(seed)
@@ -121,11 +127,11 @@ def train_drifting(
         pos = next(real_dataloader).to(training_dtype).to(training_device)
 
         with torch.no_grad():
-            if vae is not None:
+            if pixel_features:
+                pos_features = feature_encoder(pos)
+            else:
                 pos_latent = vae.encode(pos).latent_dist.sample()
                 pos_features = feature_encoder(pos_latent)
-            else:
-                pos_features = feature_encoder(pos)
 
         noise = torch.randn(
             batch_size, 
@@ -133,9 +139,16 @@ def train_drifting(
             device=training_device, 
             dtype=pos.dtype
         )        
-        
-        gen_latent = transformer(noise)
-        gen_features = feature_encoder(gen_latent)
+
+        if vae is not None:
+            gen_latent = transformer(noise)
+
+        if pixel_features:
+            gen = vae.decode(gen_latent).sample
+            gen_features = feature_encoder(gen)
+        else:
+            gen_features = feature_encoder(gen_latent)
+
 
         loss, logs = drifting_loss_multifeatures(
             x_features=gen_features,

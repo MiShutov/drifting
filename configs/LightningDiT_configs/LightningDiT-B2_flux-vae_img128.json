@@ -1,0 +1,16 @@
+{
+    "model_type": "LightningDiT",
+    "dtype": "bfloat16",
+    "input_size": 16,
+    "patch_size": 2,
+    "in_channels": 32,
+    "hidden_size": 768,
+    "num_transformer_blocks": 12,
+    "num_heads": 12,
+    "mlp_ratio": 4.0,
+    "use_qknorm": 1,
+    "use_swiglu": 1,
+    "use_rope": 1,
+    "use_rmsnorm": 1,
+    "use_checkpointing": 0
+}

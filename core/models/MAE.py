@@ -2,12 +2,14 @@
 MAE-ResNet Feature Encoder for CelebA (128x128)
 Based on the official JAX implementation from "Generative Modeling via Drifting"
 """
-
+import os
+import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Union
 import math
+from accelerate import init_empty_weights
 
 
 def safe_std(x: torch.Tensor, dim: Union[int, List[int]], eps: float = 1e-6, keepdim: bool = False) -> torch.Tensor:
@@ -67,7 +69,6 @@ class BasicBlock(nn.Module):
         self.gn2 = nn.GroupNorm(choose_gn_groups(filters, gn_max_groups), filters)
         self.drop = nn.Dropout(dropout_prob)
 
-        # Проекция нужна если изменились размеры или каналы
         if stride != 1 or in_channels != filters:
             self.proj_conv = nn.Conv2d(in_channels, filters, 1, stride=stride, bias=False)
             self.proj_gn = nn.GroupNorm(choose_gn_groups(filters, gn_max_groups), filters)
@@ -252,45 +253,132 @@ class UNetDecoder(nn.Module):
         return self.head(x)
 
 
-class MAEResNet(nn.Module):
+class MAEResNetConfig:
+    """
+    Configuration class for MAEResNet model.
+    """
     def __init__(
         self,
         in_channels: int = 3,
         base_channels: int = 64,
         mask_patch_size: int = 2,
-        input_patch_size: int = 8, # = 1 if for latent representations
+        mask_ratio: float = 0.5,
+        per_channel_mask: bool = False,
+        input_patch_size: int = 1,
         dropout_prob: float = 0.0,
-        layers: Tuple[int, int, int, int] = (3, 4, 6, 3), # ResNet50
+        layers: Tuple[int, int, int, int] = (3, 4, 6, 3),
         num_classes: int = None,
+        **kwargs
     ):
-        super().__init__()
+        self.model_type = "MAEResNet"
         self.in_channels = in_channels
         self.base_channels = base_channels
         self.mask_patch_size = mask_patch_size
+        self.mask_ratio = mask_ratio
+        self.per_channel_mask = per_channel_mask
         self.input_patch_size = input_patch_size
         self.dropout_prob = dropout_prob
         self.layers = layers
         self.num_classes = num_classes
         
+        # Store any additional kwargs
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+    
+    def to_dict(self) -> dict:
+        """
+        Convert config to dictionary.
+        """
+        config_dict = {}
+        for key, value in self.__dict__.items():
+            if not key.startswith('_'):  # Skip private attributes
+                config_dict[key] = value
+        return config_dict
+    
+    def to_json_string(self) -> str:
+        """
+        Serialize config to JSON string.
+        """
+        return json.dumps(self.to_dict(), indent=2)
+    
+    def save_pretrained(self, path: str):
+        """
+        Save configuration to JSON file.
+        """
+        os.makedirs(path, exist_ok=True)
+        config_path = os.path.join(path, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        return config_path
+    
+    @classmethod
+    def from_pretrained(cls, path: str) -> "MAEResNetConfig":
+        """
+        Load configuration from JSON file.
+        """
+        config_path = os.path.join(path, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found at {config_path}")
+        
+        with open(config_path, "r") as f:
+            config_dict = json.load(f)
+        
+        # Verify model type
+        if config_dict.get("model_type") != "MAEResNet":
+            raise ValueError(f"Expected model_type 'MAEResNet', got '{config_dict.get('model_type')}'")
+        
+        return cls(**config_dict)
+    
+    @classmethod
+    def from_dict(cls, config_dict: dict) -> "MAEResNetConfig":
+        """
+        Create config from dictionary.
+        """
+        return cls(**config_dict)
+    
+    def __repr__(self) -> str:
+        return f"MAEResNetConfig({self.to_json_string()})"
+
+
+class MAEResNet(nn.Module):
+    def __init__(
+        self,
+        config: MAEResNetConfig
+    ):
+        super().__init__()
+        self.config = config
+        
+        self.in_channels = config.in_channels
+        self.base_channels = config.base_channels
+        self.mask_patch_size = config.mask_patch_size
+        self.mask_ratio = config.mask_ratio
+        self.per_channel_mask = config.per_channel_mask
+        self.input_patch_size = config.input_patch_size
+        self.dropout_prob = config.dropout_prob
+        self.layers = config.layers
+        self.num_classes = config.num_classes
+        
         # Encoder
         self.encoder = ResNetEncoder(
-            base_channels=base_channels,
-            layers=layers,
-            dropout_prob=dropout_prob,
-            in_channels=in_channels * input_patch_size * input_patch_size,
+            base_channels=config.base_channels,
+            layers=config.layers,
+            dropout_prob=config.dropout_prob,
+            in_channels=config.in_channels * config.input_patch_size * config.input_patch_size,
         )
         
         # Decoder
         self.decoder = UNetDecoder(
-            base_channels=base_channels,
-            out_channels=in_channels * input_patch_size * input_patch_size,
+            base_channels=config.base_channels,
+            out_channels=config.in_channels * config.input_patch_size * config.input_patch_size,
         )
         
         # Classification head
         if self.num_classes is not None: 
-            self.fc = nn.Linear(base_channels * 8, num_classes)  # layer4: base_channels * 8
+            self.fc = nn.Linear(config.base_channels * 8, config.num_classes)  # layer4: base_channels * 8
         
         self._initialize_weights()
+        self.to(getattr(torch, config.dtype))
+
     
     def _initialize_weights(self):
         for m in self.modules():
@@ -298,31 +386,26 @@ class MAEResNet(nn.Module):
                 nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+
     
     def make_patch_mask(
         self,
         x: torch.Tensor,
-        mask_ratio: torch.Tensor,
-        patch_size: int = 2,
     ) -> torch.Tensor:
-        """Создает бинарную маску для патчей"""
-        B, _, H, W = x.shape
-        nh, nw = H // patch_size, W // patch_size
+        B, C, H, W = x.shape
+        if self.per_channel_mask:
+            noise = torch.rand(B, C, H // self.mask_patch_size, W // self.mask_patch_size, device=x.device, dtype=x.dtype)
+        else:
+            noise = torch.rand(B, 1, H // self.mask_patch_size, W // self.mask_patch_size, device=x.device, dtype=x.dtype)
         
-        # Создаем шум для маскирования
-        noise = torch.rand(B, nh, nw, device=x.device, dtype=x.dtype)
-        
-        # Маска: 1 - замаскировано, 0 - видимо
-        mask = (noise < mask_ratio).to(x.dtype)
-        
-        # Upsample до размера изображения
-        mask = F.interpolate(mask.unsqueeze(1), size=(H, W), mode='nearest')
+        mask = (noise < self.mask_ratio).to(x.dtype)
+        mask = F.interpolate(mask, size=(H, W), mode='nearest')
         return mask
+
     
     def forward(
         self,
         x: torch.Tensor,
-        mask_ratio: float = 0.50,
         labels: Optional[torch.Tensor] = None,
         lambda_cls: float = 0.0,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -330,7 +413,7 @@ class MAEResNet(nn.Module):
         x = patchify(x, self.input_patch_size)
         
         # Masking
-        mask = self.make_patch_mask(x, mask_ratio, self.mask_patch_size)
+        mask = self.make_patch_mask(x)
         x_masked = x * (1.0 - mask)
         
         # Encoder
@@ -360,6 +443,69 @@ class MAEResNet(nn.Module):
         
         metrics['loss'] = loss
         return loss, metrics
+
+
+    def save_pretrained(self, path, verbose=False):
+        """
+        Save model weights and configuration to the specified path.
+        Creates the directory if it doesn't exist.
+        
+        Args:
+            path (str): Directory path where to save the model
+        """
+        os.makedirs(path, exist_ok=True)
+        
+        # Save configuration using the config object
+        config_path = self.config.save_pretrained(path)
+        
+        # Save model weights
+        weights_path = os.path.join(path, "pytorch_model.pth")
+        torch.save(self.state_dict(), weights_path)
+
+        if verbose:
+            print(f"Model saved to {path}")
+            print(f"  - Config: {config_path}")
+            print(f"  - Weights: {weights_path}")
+            return config_path, weights_path
+
+
+    @staticmethod
+    def from_pretrained(path, device="cpu", dtype=None, verbose=False):
+        """
+        Load a pretrained MAEResNet model from the specified path.
+        
+        Args:
+            path (str): Directory path where the model is saved
+            
+        Returns:
+            MAEResNet: Loaded model with pretrained weights
+        """
+        # Load configuration
+        config = MAEResNetConfig.from_pretrained(path)
+        
+        # Create model with loaded config
+        with init_empty_weights():
+            model = MAEResNet(config=config)
+        model = model.to_empty(device=device)
+        if dtype is None:
+            dtype = getattr(torch, config.dtype)
+        model = model.to(dtype)
+
+        # Load weights
+        weights_path = os.path.join(path, "pytorch_model.pth")
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Weights file not found at {weights_path}")
+        
+        state_dict = torch.load(weights_path, map_location="cpu")
+        model.load_state_dict(state_dict)
+
+        if verbose:
+            print(f"Model loaded from {path}")
+            print(f"  - Config: {os.path.join(path, 'config.json')}")
+            print(f"  - Weights: {weights_path}")
+        
+        return model
+
     
 
 class FeatureExtractor(nn.Module):
@@ -402,7 +548,6 @@ class FeatureExtractor(nn.Module):
         """
         x = patchify(x, self.input_patch_size)
         
-        # Проход через энкодер с промежуточными выходами
         need_blocks = (
             isinstance(self.every_k_block, (int, float)) and 
             not math.isinf(float(self.every_k_block)) and 
@@ -425,28 +570,28 @@ class FeatureExtractor(nn.Module):
         for f_name, f in feats.items():
             B_f, C, Hf, Wf = f.shape
             
-            # --- (a) Пространственные векторы ---
+            # --- Spatial features ---
             spatial = f.permute(0, 2, 3, 1).reshape(B_f, Hf * Wf, C)  # [B, N, C]
             spatial_features = spatial.permute(1, 0, 2)  # [N, B, C]
             features_by_dim.setdefault(C, []).append(spatial_features)
             
-            # --- (b) Глобальные статистики ---
+            # --- Global stats ---
             mean_global = f.mean(dim=[2, 3])  # [B, C]
             std_global = f.std(dim=[2, 3])    # [B, C]
             features_by_dim.setdefault(C, []).append(mean_global.unsqueeze(0))  # [1, B, C]
             features_by_dim.setdefault(C, []).append(std_global.unsqueeze(0))    # [1, B, C]
             
-            # --- (c) Патчи 2×2 ---
+            # --- Patches 2×2 ---
             if Hf >= 2 and Wf >= 2:
                 mean_p2, std_p2 = self._get_patch_stats(f, 2)
-                features_by_dim.setdefault(C, []).append(mean_p2.permute(1, 0, 2))  # [num_patches, B, C]
-                features_by_dim.setdefault(C, []).append(std_p2.permute(1, 0, 2))
+                features_by_dim.setdefault(C, []).append(mean_p2)  # [num_patches, B, C]
+                features_by_dim.setdefault(C, []).append(std_p2)
             
-            # --- (d) Патчи 4×4 ---
+            # --- Patches 4×4 ---
             if Hf >= 4 and Wf >= 4:
                 mean_p4, std_p4 = self._get_patch_stats(f, 4)
-                features_by_dim.setdefault(C, []).append(mean_p4.permute(1, 0, 2))
-                features_by_dim.setdefault(C, []).append(std_p4.permute(1, 0, 2))
+                features_by_dim.setdefault(C, []).append(mean_p4)
+                features_by_dim.setdefault(C, []).append(std_p4)
         
         # Конкатенация по размерности N_features
         grouped_features = []
@@ -468,135 +613,8 @@ class FeatureExtractor(nn.Module):
         var_patch = patches.var(dim=[-2, -1])    # [B, C, num_h, num_w]
         std_patch = torch.sqrt(var_patch + 1e-8)  # [B, C, num_h, num_w]
         
-        # Превращаем в [B, num_patches, C]
-        mean_patch = mean_patch.permute(0, 2, 3, 1).reshape(B, -1, C)
-        std_patch = std_patch.permute(0, 2, 3, 1).reshape(B, -1, C)
-        
+        # [num_patches, B, C]
+        mean_patch = mean_patch.permute(2, 3, 0, 1).reshape(-1, B, C)
+        std_patch = std_patch.permute(2, 3, 0, 1).reshape(-1, B, C)
         return mean_patch, std_patch
 
-
-    # def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-    #     """
-    #     Извлекает признаки для Drifting Model.
-        
-    #     Args:
-    #         x: входные изображения (B, C, H, W)
-        
-    #     Returns:
-    #         Dict[str, torch.Tensor]: словарь признаков, каждый формы (B, T, D)
-    #     """
-    #     # Базовые признаки
-    #     out: Dict[str, torch.Tensor] = {}
-        
-    #     # Масштаб
-    #     if self.use_scale:
-    #         out['norm_x'] = torch.sqrt((x ** 2).mean(dim=(2, 3)) + 1e-6)[None, :, :]
-        
-    #     # MAE признаки
-    #     mae_feats = self.get_activations(
-    #         x,
-    #         patch_mean_size=self.patch_mean_size,
-    #         patch_std_size=self.patch_std_size,
-    #         use_std=self.use_std,
-    #         use_mean=self.use_mean,
-    #         every_k_block=self.every_k_block,
-    #     )
-    #     out.update(mae_feats)
-        
-    #     return out
-
-
-    # def get_activations(
-    #     self,
-    #     x: torch.Tensor,
-    #     patch_mean_size: Optional[List[int]] = None,
-    #     patch_std_size: Optional[List[int]] = None,
-    #     use_std: bool = True,
-    #     use_mean: bool = True,
-    #     every_k_block: float = 2.0,
-    # ) -> Dict[str, torch.Tensor]:
-    #     """
-    #     Извлекает многоуровневые признаки из энкодера для Drifting Model.
-        
-    #     Args:
-    #         x: входные изображения (B, C, H, W)
-    #         patch_mean_size: размеры патчей для вычисления среднего
-    #         patch_std_size: размеры патчей для вычисления std
-    #         use_std: использовать ли std
-    #         use_mean: использовать ли mean
-    #         every_k_block: частота извлечения промежуточных блоков
-        
-    #     Returns:
-    #         Dict[str, torch.Tensor]: словарь признаков. Каждое значение имеет форму (B, T, D),
-    #         где T - количество пространственных токенов, D - размерность каналов.
-    #     """
-    #     patch_mean_size = patch_mean_size or []
-    #     patch_std_size = patch_std_size or []
-        
-    #     # Patch input
-    #     x = patchify(x, self.input_patch_size)
-        
-    #     # Проход через энкодер с промежуточными выходами
-    #     need_blocks = (
-    #         isinstance(every_k_block, (int, float)) and 
-    #         not math.isinf(float(every_k_block)) and 
-    #         every_k_block >= 1
-    #     )
-        
-    #     if need_blocks:
-    #         feats, block_outputs = self.encoder(x, train=False, return_block_outputs=True)
-    #     else:
-    #         feats = self.encoder(x, train=False)
-    #         block_outputs = {}
-        
-    #     out: Dict[str, torch.Tensor] = {}
-        
-    #     # Нормализованный x (для информации о масштабе)
-    #     out['norm_x'] = torch.sqrt((x ** 2).mean(dim=(2, 3)) + 1e-6)[None, :, :]
-        
-    #     def process_feat(name: str, feat: torch.Tensor) -> None:
-    #         """Обрабатывает один feature map"""
-    #         B, C, H, W = feat.shape
-            
-    #         # Основной признак: [B, H*W, C]
-    #         # out[name] = feat.permute(0, 2, 3, 1).reshape(B, -1, C)
-    #         out[name] = feat.permute(2, 3, 0, 1).reshape(-1, B, C)
-            
-    #         # Глобальные статистики
-    #         if use_mean:
-    #             out[f'{name}_mean'] = feat.mean(dim=(2, 3))[None, :, :]
-    #         if use_std:
-    #             out[f'{name}_std'] = safe_std(feat, dim=(2, 3))[None, :, :]
-            
-    #         # Статистики по патчам
-    #         for size in patch_mean_size:
-    #             if H % size == 0 and W % size == 0:
-    #                 reshaped = feat.unfold(2, size, size).unfold(3, size, size)
-    #                 reshaped = reshaped.contiguous().view(B, C, H // size, W // size, size * size)
-    #                 mean_patches = reshaped.mean(dim=-1)
-    #                 # out[f'{name}_mean_{size}'] = mean_patches.permute(0, 2, 3, 1).reshape(B, -1, C)
-    #                 out[f'{name}_mean_{size}'] = mean_patches.permute(2, 3, 0, 1).reshape(-1, B, C)
-            
-    #         for size in patch_std_size:
-    #             if H % size == 0 and W % size == 0:
-    #                 reshaped = feat.unfold(2, size, size).unfold(3, size, size)
-    #                 reshaped = reshaped.contiguous().view(B, C, H // size, W // size, size * size)
-    #                 std_patches = safe_std(reshaped, dim=-1)
-    #                 # out[f'{name}_std_{size}'] = std_patches.permute(0, 2, 3, 1).reshape(B, -1, C)
-    #                 out[f'{name}_std_{size}'] = std_patches.permute(2, 3, 0, 1).reshape(-1, B, C)
-        
-    #     # Обработка всех feature maps
-    #     for name, feat in feats.items():
-    #         process_feat(name, feat)
-        
-    #     # Промежуточные блоки
-    #     if need_blocks:
-    #         k = int(every_k_block)
-    #         for i in range(1, 5):
-    #             lname = f'layer{i}'
-    #             blocks = block_outputs.get(lname, [])
-    #             for blk_idx, feat_i in enumerate(blocks, start=1):
-    #                 if blk_idx % k == 0:
-    #                     process_feat(f'{lname}_blk{blk_idx}', feat_i)
-        
-    #     return out
